@@ -240,4 +240,4 @@ class arguments:
 if __name__ == "__main__":
     main_args = arguments()
 
-    main(main_args, continue_from_save=False, eval_only=False)
+    main(main_args, eval_only=False)
