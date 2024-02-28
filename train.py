@@ -13,7 +13,7 @@ import torch.cuda.amp as amp
 from utils import poly_lr_scheduler
 from utils import reverse_one_hot, compute_global_accuracy, fast_hist, per_class_iu
 from tqdm import tqdm
-
+import argparse
 
 logger = logging.getLogger()
 
@@ -81,20 +81,13 @@ def train(args, model, optimizer, dataloader_train, dataloader_val):
         tq.set_description("epoch %d, lr %f" % (epoch, lr))
         loss_record = []
         for i, (data, label) in enumerate(dataloader_train):
-            # print("\t",i)
             data = data.cuda()
             label = label.long().cuda()
             optimizer.zero_grad()  # Zero-ing the gradients
-            # From: [batch_size, height, width, channels]
-            # To: [batch_size, channels, height, width]
-            # data = data.permute(0, 3, 1, 2)
-            # print("input:",data.size())
 
             with amp.autocast():
                 output, out16, out32 = model(data)  # Forward pass to the network
-                # print("output:", output.size())
-                # print("out16:", out16.size())
-                # print("out32:", out32.size())
+
                 # Compute loss based on output and ground truth
                 loss1 = loss_func(output, label.squeeze(1))
                 loss2 = loss_func(out16, label.squeeze(1))
@@ -103,7 +96,6 @@ def train(args, model, optimizer, dataloader_train, dataloader_val):
             # print("loss:", loss)
 
             # Compute gradients for each layer and update weights
-            loss.backward(retain_graph=True)
             scaler.scale(loss).backward()  # backward pass: computes gradients
             scaler.step(optimizer)  # update weights based on accumulated gradients
             scaler.update()
@@ -144,28 +136,125 @@ def train(args, model, optimizer, dataloader_train, dataloader_val):
             writer.add_scalar("epoch/miou val", miou, epoch)
 
 
-def main(args, eval_only=False):
+def str2bool(v):
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Unsupported value encountered.")
 
+
+def parse_args(params):
+    parse = argparse.ArgumentParser()
+
+    parse.add_argument(
+        "--mode",
+        dest="mode",
+        type=str,
+        default="train",
+    )
+
+    parse.add_argument(
+        "--backbone",
+        dest="backbone",
+        type=str,
+        default="CatmodelSmall",
+    )
+    parse.add_argument(
+        "--pretrain_path",
+        dest="pretrain_path",
+        type=str,
+        default="",
+    )
+    parse.add_argument(
+        "--use_conv_last",
+        dest="use_conv_last",
+        type=str2bool,
+        default=False,
+    )
+    parse.add_argument(
+        "--num_epochs", type=int, default=300, help="Number of epochs to train for"
+    )
+    parse.add_argument(
+        "--epoch_start_i",
+        type=int,
+        default=0,
+        help="Start counting epochs from this number",
+    )
+    parse.add_argument(
+        "--checkpoint_step",
+        type=int,
+        default=10,
+        help="How often to save checkpoints (epochs)",
+    )
+    parse.add_argument(
+        "--validation_step",
+        type=int,
+        default=1,
+        help="How often to perform validation (epochs)",
+    )
+    parse.add_argument(
+        "--crop_height",
+        type=int,
+        default=512,
+        help="Height of cropped/resized input image to modelwork",
+    )
+    parse.add_argument(
+        "--crop_width",
+        type=int,
+        default=1024,
+        help="Width of cropped/resized input image to modelwork",
+    )
+    parse.add_argument(
+        "--batch_size", type=int, default=2, help="Number of images in each batch"
+    )
+    parse.add_argument(
+        "--learning_rate", type=float, default=0.01, help="learning rate used for train"
+    )
+    parse.add_argument("--num_workers", type=int, default=4, help="num of workers")
+    parse.add_argument(
+        "--num_classes", type=int, default=19, help="num of object classes (with void)"
+    )
+    parse.add_argument(
+        "--cuda", type=str, default="0", help="GPU ids used for training"
+    )
+    parse.add_argument(
+        "--use_gpu", type=bool, default=True, help="whether to user gpu for training"
+    )
+    parse.add_argument(
+        "--save_model_path", type=str, default=None, help="path to save model"
+    )
+    parse.add_argument(
+        "--optimizer",
+        type=str,
+        default="adam",
+        help="optimizer, support rmsprop, sgd, adam",
+    )
+    parse.add_argument("--loss", type=str, default="crossentropy", help="loss function")
+
+    return parse.parse_args()
+
+
+def main(params):
+    args = parse_args(params)
+
+    ## dataset
     n_classes = args.num_classes
-    # mode = args.mode
+    mode = args.mode
     root = args.root
 
-    if root == "Cityscapes/Cityspaces/":
-        train_dataset = CityScapes(root, "train")
-        val_dataset = CityScapes(root, "val")
-    else:
-        train_dataset = GTA5(root, "train")
-        val_dataset = GTA5(root, "val")
-
+    train_dataset = CityScapes(mode)
     dataloader_train = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers,
         pin_memory=False,
         drop_last=True,
     )
 
+    val_dataset = CityScapes(mode="val")
     dataloader_val = DataLoader(
         val_dataset,
         batch_size=1,
@@ -181,10 +270,6 @@ def main(args, eval_only=False):
         pretrain_model=args.pretrain_path,
         use_conv_last=args.use_conv_last,
     )
-
-    if args.epoch_start_i != 0:
-        print(f"loading data from saved model {args.saved_model}")
-        model.load_state_dict(torch.load(f"{args.save_model_path}{args.saved_model}"))
 
     if torch.cuda.is_available() and args.use_gpu:
         model = torch.nn.DataParallel(model).cuda()
@@ -203,41 +288,38 @@ def main(args, eval_only=False):
         print("not supported optimizer \n")
         return None
 
-    if not eval_only:
-        ## train loop
-        train(args, model, optimizer, dataloader_train, dataloader_val)
+    ## train loop
+    train(args, model, optimizer, dataloader_train, dataloader_val)
     # final test
     val(args, model, dataloader_val)
 
 
-class arguments:
-    # mode = "train"
-    backbone = "CatmodelSmall"
-    pretrain_path = (
-        "/content/Drive/MyDrive/Colab Notebooks/checkpoints/STDCNet813M_73.91.tar"
-    )
-    use_conv_last = False
-    num_epochs = 50
-    epoch_start_i = 0
-    checkpoint_step = 5
-    validation_step = 100
-    crop_height = 512
-    crop_width = 1024
-    batch_size = 12
-    learning_rate = 0.01
-    num_workers = 2
-    num_classes = 19
-    cuda = "0"
-    use_gpu = True
-    save_model_path = "/content/Drive/MyDrive/Colab Notebooks/Partial models/"
-    saved_model = f"Saved_model_epoch_{epoch_start_i}.pth"
-    optimizer = "adam"
-    loss = "crossentropy"
-    root = "Cityscapes/Cityspaces/"
-    # root='GTA5/'
-
-
 if __name__ == "__main__":
-    main_args = arguments()
+    params = [
+        "--num_epochs",
+        "50",
+        "--learning_rate",
+        "1e-2",
+        "--pretrain_path",
+        "/content/Drive/MyDrive/AML project/checkpoints/STDCNet813M_73.91.tar",
+        "--path_dataset",
+        "/content/Drive/MyDrive/Datasets/Cityscapes",
+        "--num_workers",
+        "8",
+        "--num_classes",
+        "19",
+        "--cuda",
+        "0",
+        "--batch_size",
+        "4",
+        "--save_model_path",
+        "/content/drive/MyDrive/checkpoints_101_sgd",
+        "--context_path",
+        "resnet101",  # set resnet18 or resnet101, only support resnet18 and resnet101
+        "--optimizer",
+        "sgd",
+        "--loss",
+        "crossentropy",
+    ]
 
-    main(main_args, eval_only=False)
+    main(params)
