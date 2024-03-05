@@ -24,6 +24,8 @@ def val(args, model, dataloader):
         model.eval()
         precision_record = []
         hist = np.zeros((args.num_classes, args.num_classes))
+        tq = tqdm(total=len(dataloader))
+        tq.set_description("Validation")
         for i, (data, label) in enumerate(dataloader):
             label = label.type(torch.LongTensor)
             data = data.cuda()
@@ -47,6 +49,8 @@ def val(args, model, dataloader):
             # predict = colour_code_segmentation(np.array(predict), label_info)
             # label = colour_code_segmentation(np.array(label), label_info)
             precision_record.append(precision)
+
+            tq.update(1)
 
         precision = np.mean(precision_record)
         miou_list = per_class_iu(hist)
@@ -93,7 +97,6 @@ def train(args, model, optimizer, dataloader_train, dataloader_val):
                 loss2 = loss_func(out16, label.squeeze(1))
                 loss3 = loss_func(out32, label.squeeze(1))
                 loss = loss1 + loss2 + loss3  # sum of losses
-            # print("loss:", loss)
 
             # Compute gradients for each layer and update weights
             scaler.scale(loss).backward()  # backward pass: computes gradients
@@ -115,7 +118,6 @@ def train(args, model, optimizer, dataloader_train, dataloader_val):
 
             if not os.path.isdir(args.save_model_path):
                 os.mkdir(args.save_model_path)
-            # torch.save(model.state_dict(), f'{args.save_model_path}Saved_model_epoch_{epoch}.pth')
             torch.save(
                 model.module.state_dict(),
                 f"{args.save_model_path}Saved_model_epoch_{epoch}.pth",
